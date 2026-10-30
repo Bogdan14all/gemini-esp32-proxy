@@ -1,10 +1,11 @@
 import os
 import requests
 import base64
+import time
 from flask import Flask, request, Response
 
 app = Flask(__name__)
-# Îi spunem lui Flask să accepte fișiere audio mari (până la 16MB)
+# Permitem request-uri mari (audio)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 
 
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -17,14 +18,14 @@ def health_check():
 def audio():
     try:
         raw_data = request.get_data()
-        print(f"\n[SERVER] Primit {len(raw_data)} bytes.")
-        
         if len(raw_data) < 1000:
             return "Prea putin audio", 400
 
+        print(f"\n[SERVER] Primit {len(raw_data)} bytes.")
         audio_b64_in = base64.b64encode(raw_data).decode('utf-8')
 
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + API_KEY
+        # Modele de rezervă, în caz că unul este indisponibil sau ocupat
+        models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
         
         payload = {
             "contents": [{
@@ -39,45 +40,65 @@ def audio():
             }
         }
 
-        print("[SERVER] Trimitere catre Google (timeout 25s)...")
-        # Setam timeout la 25 de secunde ca sa nu ne omoare Render-ul la 30s
-        response = requests.post(url, json=payload, timeout=25)
-        
-        print(f"[SERVER] Cod Google: {response.status_code}")
-        
-        try:
-            resp_json = response.json()
-        except Exception:
-            print(f"[SERVER] Google a trimis HTML: {response.text[:100]}")
-            return "Eroare: Google a trimis HTML.", 200
+        final_audio_out = None
+        last_error = ""
 
-        if "error" in resp_json:
-            err_msg = resp_json["error"].get("message", "Eroare necunoscuta")
-            print(f"[SERVER] Eroare Google: {err_msg}")
-            return f"Google: {err_msg[:80]}", 200
+        for model in models_to_try:
+            print(f"[SERVER] Incercare model: {model}")
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}"
+            
+            # Încercăm de 2 ori pentru fiecare model (în caz de eroare 503 temporară)
+            for attempt in range(2):
+                try:
+                    # Timeout strict la 20 secunde pentru a nu depăși limita Render (30s)
+                    response = requests.post(url, json=payload, timeout=20)
+                    
+                    if response.status_code == 200:
+                        resp_json = response.json()
+                        parts = resp_json.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                        for part in parts:
+                            if "inlineData" in part:
+                                final_audio_out = part["inlineData"]["data"]
+                                break
+                        
+                        if final_audio_out:
+                            print(f"[SERVER] Succes cu {model}!")
+                            break # Ieșim din bucla de 'attempt'
+                    
+                    elif response.status_code == 503:
+                        print(f"[SERVER] {model} ocupat (503). Incerc din nou in 2s...")
+                        time.sleep(2)
+                    
+                    elif response.status_code == 404:
+                        print(f"[SERVER] {model} nu exista (404). Trec la urmatorul...")
+                        break # Trecem la urmatorul model din listă
+                    
+                    else:
+                        last_error = f"Cod {response.status_code}"
+                        print(f"[SERVER] Eroare {last_error}: {response.text[:100]}")
+                        break # Trecem la următorul model
 
-        try:
-            parts = resp_json["candidates"][0]["content"]["parts"]
-            audio_out_b64 = None
-            for part in parts:
-                if "inlineData" in part:
-                    audio_out_b64 = part["inlineData"]["data"]
+                except requests.exceptions.Timeout:
+                    print(f"[SERVER] {model} a expirat (Timeout). Trec la urmatorul...")
+                    last_error = "Timeout"
+                    break # Trecem la următorul model
+                except Exception as e:
+                    print(f"[SERVER] Eroare {model}: {str(e)}")
+                    last_error = str(e)
                     break
             
-            if not audio_out_b64:
-                return "Eroare: Fara audio in raspuns.", 200
+            if final_audio_out:
+                break # Dacă avem audio, nu mai încercăm alte modele
 
-            audio_out_bytes = base64.b64decode(audio_out_b64)
-            print(f"[SERVER] Succes! Trimit {len(audio_out_bytes)} bytes inapoi.")
-            return Response(audio_out_bytes, mimetype='application/octet-stream')
+        if not final_audio_out:
+            print(f"[SERVER] Esec total. Ultima eroare: {last_error}")
+            return f"Eroare server: {last_error}", 200
 
-        except Exception as e:
-            print(f"[SERVER] Eroare parsare: {e}")
-            return f"Eroare parsare: {e}", 200
+        # Decodăm audio-ul din Base64 și îl trimitem ca bytes
+        audio_out_bytes = base64.b64decode(final_audio_out)
+        print(f"[SERVER] Trimit {len(audio_out_bytes)} bytes audio inapoi la ESP32.")
+        return Response(audio_out_bytes, mimetype='application/octet-stream')
 
-    except requests.exceptions.Timeout:
-        print("[SERVER] Eroare: Google a depasit timpul de 25 secunde!")
-        return "Eroare: Google a raspuns prea greu.", 200
     except Exception as e:
         print(f"[SERVER] Exceptie fatala: {str(e)}")
         return f"Exceptie server: {str(e)}", 200
