@@ -1,7 +1,6 @@
 import os
 import requests
 import base64
-import time
 from flask import Flask, request, Response
 
 app = Flask(__name__)
@@ -18,16 +17,16 @@ def audio():
         if len(raw_data) < 1000:
             return "Prea putin audio", 400
 
-        print(f"\n[SERVER] Primit {len(raw_data)} bytes de la ESP32.")
+        print(f"\n[SERVER] Primit {len(raw_data)} bytes.")
         audio_b64_in = base64.b64encode(raw_data).decode('utf-8')
 
-        # Lista de modele de rezervă (Fallback)
-        models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
+        # Folosim modelul sugerat de Google pentru text/audio
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + API_KEY
         
         payload = {
             "contents": [{
                 "parts": [
-                    {"text": "Asculta acest audio si raspunde scurt si natural in romana."},
+                    {"text": "Asculta acest audio si raspunde scurt in romana."},
                     {"inlineData": {"mimeType": "audio/pcm;rate=16000", "data": audio_b64_in}}
                 ]
             }],
@@ -37,62 +36,48 @@ def audio():
             }
         }
 
-        final_audio_out = None
-        error_message = ""
+        print("[SERVER] Trimitere catre Google...")
+        response = requests.post(url, json=payload, timeout=60)
+        
+        # Afisam in log-urile Render exact ce a raspuns Google
+        print(f"[SERVER] Cod Google: {response.status_code}")
+        
+        # Încercăm să citim răspunsul
+        try:
+            resp_json = response.json()
+        except Exception:
+            print(f"[SERVER] Google a trimis HTML sau text invalid: {response.text[:200]}")
+            return "Eroare: Google a trimis un raspuns invalid.", 200
 
-        for model in models_to_try:
-            print(f"[SERVER] Incercare model: {model}")
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key=" + API_KEY
+        # Dacă Google a trimis o eroare (ex: model ocupat, fara acces)
+        if "error" in resp_json:
+            err_msg = resp_json["error"].get("message", "Eroare necunoscuta")
+            print(f"[SERVER] Eroare Google: {err_msg}")
+            # Returnam 200 ca ESP32-ul sa poata citi mesajul curat
+            return f"Google: {err_msg[:100]}", 200
+
+        # Dacă a mers bine, extragem sunetul
+        try:
+            parts = resp_json["candidates"][0]["content"]["parts"]
+            audio_out_b64 = None
+            for part in parts:
+                if "inlineData" in part:
+                    audio_out_b64 = part["inlineData"]["data"]
+                    break
             
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    response = requests.post(url, json=payload, timeout=60)
+            if not audio_out_b64:
+                print("[SERVER] Google nu a trimis audio.")
+                return "Eroare: Google nu a trimis audio.", 200
 
-                    if response.status_code == 503:
-                        wait_time = 2 ** attempt
-                        print(f"[SERVER] {model} ocupat (503). Reincerc in {wait_time}s...")
-                        time.sleep(wait_time)
-                        continue # Reincearca acelasi model
-                    
-                    elif response.status_code == 404:
-                        print(f"[SERVER] {model} nu exista (404). Trec la urmatorul model...")
-                        break # Iese din bucla de retry si trece la urmatorul model din lista
-                    
-                    elif response.status_code != 200:
-                        print(f"[SERVER] Eroare HTTP {response.status_code} la {model}.")
-                        error_message = f"Eroare {response.status_code}"
-                        break # Iese si trece la urmatorul model
+            audio_out_bytes = base64.b64decode(audio_out_b64)
+            print(f"[SERVER] Succes! Trimit {len(audio_out_bytes)} bytes inapoi.")
+            return Response(audio_out_bytes, mimetype='application/octet-stream')
 
-                    # Daca e 200 OK, procesam
-                    resp_json = response.json()
-                    parts = resp_json["candidates"][0]["content"]["parts"]
-                    for part in parts:
-                        if "inlineData" in part:
-                            final_audio_out = part["inlineData"]["data"]
-                            break
-                    
-                    if final_audio_out:
-                        print(f"[SERVER] Succes cu modelul {model}!")
-                        break # Iese din bucla de retry
-                        
-                except Exception as e:
-                    print(f"[SERVER] Eroare retea la {model}: {str(e)}")
-                    error_message = str(e)
-                    time.sleep(2)
-
-            if final_audio_out:
-                break # Daca am gasit audio, oprim căutarea
-
-        if not final_audio_out:
-            print(f"[SERVER] Toate modelele au esuat. Ultima eroare: {error_message}")
-            return f"Toate modelele au esuat. {error_message}", 500
-
-        # Trimitem inapoi audio-ul brut
-        audio_out_bytes = base64.b64decode(final_audio_out)
-        print(f"[SERVER] Trimit {len(audio_out_bytes)} bytes inapoi la ESP32.")
-        return Response(audio_out_bytes, mimetype='application/octet-stream')
+        except Exception as e:
+            print(f"[SERVER] Eroare parsare: {e}")
+            print(f"[SERVER] JSON Raw: {resp_json}")
+            return f"Eroare parsare: {e}", 200
 
     except Exception as e:
-        print(f"[SERVER] Eroare fatala: {str(e)}")
-        return str(e), 500
+        print(f"[SERVER] Exceptie fatala: {str(e)}")
+        return f"Exceptie server: {str(e)}", 200
