@@ -4,7 +4,7 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-API_KEY = os.environ.get("GEMINI_API_KEY")
+API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 @app.route('/')
 def health_check():
@@ -12,38 +12,41 @@ def health_check():
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    data = request.json
-    prompt = data.get('text', 'Salut!')
-    
-    print(f"\n[SERVER] Primit: {prompt}")
-    
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + API_KEY
-    headers = {"Content-Type": "application/json"}
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    
-    # Încercăm de până la 3 ori, cu timeout mărit
-    for attempt in range(3):
-        try:
-            print(f"[SERVER] Încercarea {attempt+1}/3...")
-            # Timeout mărit la 60 de secunde
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            response.raise_for_status()
+    try:
+        # Preluăm datele în siguranță
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"status": "error", "text": "Eroare: Date JSON invalide."}), 200
             
-            resp_json = response.json()
-            text_response = resp_json["candidates"][0]["content"]["parts"][0]["text"]
+        prompt = data.get('text', 'Salut!')
+        print(f"\n[SERVER] Primit: {prompt}")
+        
+        if not API_KEY:
+            return jsonify({"status": "error", "text": "Eroare: API_KEY lipseste."}), 200
             
-            print(f"[SERVER] Succes! Răspuns: {text_response[:50]}...")
-            return jsonify({"status": "ok", "text": text_response})
-            
-        except requests.exceptions.Timeout:
-            print(f"[SERVER] Încercarea {attempt+1} a expirat. Reîncerc...")
-            if attempt == 2: # Dacă a treia încercare a eșuat
-                return jsonify({"status": "error", "text": "Eroare: Serverul Google nu răspunde. Încearcă din nou."}), 200
-            continue # Trecem la următoarea încercare
-        except Exception as e:
-            err_msg = str(e)
-            print(f"[SERVER] Eroare: {err_msg}")
-            return jsonify({"status": "error", "text": "Eroare: " + err_msg[:100]}), 200
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + API_KEY
+        headers = {"Content-Type": "application/json"}
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        
+        # Setăm un timeout de 30 secunde
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code != 200:
+            err_msg = "Status " + str(response.status_code)
+            try:
+                err_msg = response.json().get("error", {}).get("message", err_msg)
+            except:
+                pass
+            print(f"[SERVER] Eroare Google: {err_msg}")
+            return jsonify({"status": "error", "text": "Google: " + err_msg[:100]}), 200
 
-    # Dacă ieșim din buclă fără succes
-    return jsonify({"status": "error", "text": "Eroare necunoscută la server."}), 200
+        resp_json = response.json()
+        text_response = resp_json["candidates"][0]["content"]["parts"][0]["text"]
+        
+        print(f"[SERVER] Succes! Răspuns: {text_response[:50]}...")
+        return jsonify({"status": "ok", "text": text_response})
+        
+    except Exception as e:
+        # Prindem orice altă eroare (inclusiv timeout)
+        print(f"[SERVER] Exceptie: {str(e)}")
+        return jsonify({"status": "error", "text": "Eroare Server: " + str(e)[:100]}), 200
