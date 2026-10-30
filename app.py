@@ -1,6 +1,5 @@
 import os
 import asyncio
-import base64
 import traceback
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from google import genai
@@ -8,6 +7,7 @@ from google.genai import types
 
 app = FastAPI()
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
+# Asigură-te că folosești v1beta, este cel standard pentru Live API
 client = genai.Client(api_key=API_KEY, http_options={'api_version': 'v1beta'})
 
 @app.get("/")
@@ -21,17 +21,16 @@ async def websocket_endpoint(websocket: WebSocket):
     
     try:
         print("[SERVER] Se încearcă conectarea la Google Live API...")
-        # Folosim modelul recomandat pentru Live API
+        # FOLOSIM MODELUL CORECT PENTRU VOCE LIVE
         async with client.aio.live.connect(
-            model="gemini-2.0-flash-exp", 
+            model="models/gemini-2.0-flash-live-001", 
             config=types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Puck")
                     )
-                ),
-                system_instruction=types.Content(parts=[types.Part(text="Esti un asistent vocal. Raspunde scurt in romana.")])
+                )
             )
         ) as session:
             print("[SERVER] >>> CONECTAT CU SUCCES LA GOOGLE LIVE API! <<<")
@@ -66,13 +65,13 @@ async def websocket_endpoint(websocket: WebSocket):
 
     except Exception as e:
         print(f"[SERVER] EROARE FATALA LA CONECTAREA CU GOOGLE:")
-        traceback.print_exc() # Afiseaza eroarea exacta in log-urile Render
+        traceback.print_exc()
+        try:
+            await websocket.send_text(f"EROARE GOOGLE: {str(e)}")
+        except:
+            pass
     finally:
         try:
             await websocket.close()
         except:
             pass
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
