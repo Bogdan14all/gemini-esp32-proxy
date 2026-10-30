@@ -1,10 +1,33 @@
 import os
 import base64
 import requests
+import time
 from fastapi import FastAPI, Request, Response
 
 app = FastAPI()
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+def request_with_retry(url, payload, timeout=30, max_retries=3):
+    """Funcție care încearcă o cerere și reîncearcă la eroarea 429."""
+    for attempt in range(max_retries):
+        try:
+            res = requests.post(url, json=payload, timeout=timeout)
+            
+            if res.status_code == 429:
+                wait_time = 2 ** attempt  # 2, 4, 8 secunde
+                print(f"[RETRY] Eroare 429. Aștept {wait_time}s (încercarea {attempt+1}/{max_retries})...")
+                time.sleep(wait_time)
+                continue  # Reîncearcă
+            
+            return res  # Dacă nu e 429, returnăm răspunsul (succes sau altă eroare)
+            
+        except requests.exceptions.RequestException as e:
+            print(f"[RETRY] Eroare de rețea: {e}. Reîncerc...")
+            if attempt == max_retries - 1:
+                raise e
+            time.sleep(2 ** attempt)
+    
+    return None  # Dacă toate încercările au eșuat
 
 @app.get("/")
 def health_check():
@@ -22,23 +45,22 @@ async def voice_endpoint(request: Request):
 
         # --- 1. SPEECH TO TEXT (Transcriere) ---
         print("[SERVER] Se incearca transcrierea (STT)...")
-        # FOLOSIM MODELUL CORECT PENTRU TEXT
         stt_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + API_KEY
-        
         stt_payload = {
             "contents": [{
                 "parts": [
-                    {"text": "Transcrie exact ce se aude in acest audio. Returneaza doar textul, fara introduceri."},
+                    {"text": "Transcrie exact ce se aude in acest audio. Returneaza doar textul."},
                     {"inlineData": {"mimeType": "audio/pcm;rate=16000", "data": base64.b64encode(audio_bytes).decode('utf-8')}}
                 ]
             }]
         }
         
-        stt_res = requests.post(stt_url, json=stt_payload, timeout=30)
+        stt_res = request_with_retry(stt_url, stt_payload)
         
-        if stt_res.status_code != 200:
-            print(f"[SERVER] Eroare STT Google: {stt_res.status_code} - {stt_res.text[:100]}")
-            return Response(content=f"Eroare STT: {stt_res.status_code}", status_code=200, media_type="text/plain")
+        if stt_res is None or stt_res.status_code != 200:
+            err_code = stt_res.status_code if stt_res else "N/A"
+            print(f"[SERVER] Eroare STT după reîncercări: {err_code}")
+            return Response(content=f"Eroare STT: {err_code}", status_code=200, media_type="text/plain")
         
         text_input = stt_res.json()["candidates"][0]["content"]["parts"][0]["text"]
         print(f"[SERVER] Text transcris: {text_input}")
@@ -46,7 +68,6 @@ async def voice_endpoint(request: Request):
         # --- 2. TEXT TO SPEECH (Generare Voce) ---
         print("[SERVER] Se incearca generarea vocii (TTS)...")
         tts_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent?key=" + API_KEY
-        
         tts_payload = {
             "contents": [{"parts": [{"text": f"Spune clar: {text_input}"}]}],
             "generationConfig": {
@@ -55,11 +76,12 @@ async def voice_endpoint(request: Request):
             }
         }
 
-        tts_res = requests.post(tts_url, json=tts_payload, timeout=30)
+        tts_res = request_with_retry(tts_url, tts_payload)
         
-        if tts_res.status_code != 200:
-            print(f"[SERVER] Eroare TTS Google: {tts_res.status_code} - {tts_res.text[:100]}")
-            return Response(content=f"Eroare TTS: {tts_res.status_code}", status_code=200, media_type="text/plain")
+        if tts_res is None or tts_res.status_code != 200:
+            err_code = tts_res.status_code if tts_res else "N/A"
+            print(f"[SERVER] Eroare TTS după reîncercări: {err_code}")
+            return Response(content=f"Eroare TTS: {err_code}", status_code=200, media_type="text/plain")
 
         tts_json = tts_res.json()
         audio_out_b64 = tts_json["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
