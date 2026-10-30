@@ -7,7 +7,7 @@ from google.genai import types
 
 app = FastAPI()
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
-# Asigură-te că folosești v1beta, este cel standard pentru Live API
+# Folosim v1beta, endpoint-ul standard pentru Live API
 client = genai.Client(api_key=API_KEY, http_options={'api_version': 'v1beta'})
 
 @app.get("/")
@@ -21,16 +21,17 @@ async def websocket_endpoint(websocket: WebSocket):
     
     try:
         print("[SERVER] Se încearcă conectarea la Google Live API...")
-        # FOLOSIM MODELUL CORECT PENTRU VOCE LIVE
+        # MODELUL CORECT PENTRU VOCE LIVE
         async with client.aio.live.connect(
-            model="models/gemini-2.0-flash-live-001", 
+            model="models/gemini-live-2.5-flash-native-audio", 
             config=types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
                         prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Puck")
                     )
-                )
+                ),
+                system_instruction=types.Content(parts=[types.Part(text="Esti un asistent vocal. Raspunde scurt in romana.")])
             )
         ) as session:
             print("[SERVER] >>> CONECTAT CU SUCCES LA GOOGLE LIVE API! <<<")
