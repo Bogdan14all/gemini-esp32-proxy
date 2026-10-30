@@ -8,26 +8,26 @@ app = FastAPI()
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 def request_with_retry(url, payload, timeout=30, max_retries=3):
-    """Funcție care încearcă o cerere și reîncearcă la eroarea 429."""
     for attempt in range(max_retries):
         try:
             res = requests.post(url, json=payload, timeout=timeout)
             
             if res.status_code == 429:
-                wait_time = 2 ** attempt  # 2, 4, 8 secunde
-                print(f"[RETRY] Eroare 429. Aștept {wait_time}s (încercarea {attempt+1}/{max_retries})...")
+                # Așteptăm 20, 40, 60 de secunde pentru a trece de limita pe minut
+                wait_time = 20 * (attempt + 1) 
+                print(f"[RETRY] Eroare 429. Limita atinsa. Aștept {wait_time} secunde (încercarea {attempt+1}/{max_retries})...")
                 time.sleep(wait_time)
-                continue  # Reîncearcă
+                continue
             
-            return res  # Dacă nu e 429, returnăm răspunsul (succes sau altă eroare)
+            return res
             
         except requests.exceptions.RequestException as e:
             print(f"[RETRY] Eroare de rețea: {e}. Reîncerc...")
             if attempt == max_retries - 1:
                 raise e
-            time.sleep(2 ** attempt)
+            time.sleep(5)
     
-    return None  # Dacă toate încercările au eșuat
+    return None
 
 @app.get("/")
 def health_check():
@@ -38,12 +38,11 @@ async def voice_endpoint(request: Request):
     try:
         audio_bytes = await request.body()
         if len(audio_bytes) < 1000:
-            print("[SERVER] Eroare: Audio prea mic.")
             return Response(content="Audio prea mic", status_code=200, media_type="text/plain")
 
         print(f"\n[SERVER] Primit {len(audio_bytes)} bytes de la ESP32.")
 
-        # --- 1. SPEECH TO TEXT (Transcriere) ---
+        # --- 1. SPEECH TO TEXT ---
         print("[SERVER] Se incearca transcrierea (STT)...")
         stt_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + API_KEY
         stt_payload = {
@@ -58,14 +57,14 @@ async def voice_endpoint(request: Request):
         stt_res = request_with_retry(stt_url, stt_payload)
         
         if stt_res is None or stt_res.status_code != 200:
-            err_code = stt_res.status_code if stt_res else "N/A"
-            print(f"[SERVER] Eroare STT după reîncercări: {err_code}")
+            err_code = stt_res.status_code if stt_res else "Timeout/Limita"
+            print(f"[SERVER] Eroare STT finala: {err_code}")
             return Response(content=f"Eroare STT: {err_code}", status_code=200, media_type="text/plain")
         
         text_input = stt_res.json()["candidates"][0]["content"]["parts"][0]["text"]
         print(f"[SERVER] Text transcris: {text_input}")
 
-        # --- 2. TEXT TO SPEECH (Generare Voce) ---
+        # --- 2. TEXT TO SPEECH ---
         print("[SERVER] Se incearca generarea vocii (TTS)...")
         tts_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent?key=" + API_KEY
         tts_payload = {
@@ -79,8 +78,8 @@ async def voice_endpoint(request: Request):
         tts_res = request_with_retry(tts_url, tts_payload)
         
         if tts_res is None or tts_res.status_code != 200:
-            err_code = tts_res.status_code if tts_res else "N/A"
-            print(f"[SERVER] Eroare TTS după reîncercări: {err_code}")
+            err_code = tts_res.status_code if tts_res else "Timeout/Limita"
+            print(f"[SERVER] Eroare TTS finala: {err_code}")
             return Response(content=f"Eroare TTS: {err_code}", status_code=200, media_type="text/plain")
 
         tts_json = tts_res.json()
