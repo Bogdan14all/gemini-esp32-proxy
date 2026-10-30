@@ -13,19 +13,18 @@ def health_check():
 @app.route('/audio', methods=['POST'])
 def audio():
     try:
-        # Preluăm datele audio brute (Raw Bytes) de la ESP32
         raw_data = request.get_data()
         
         if len(raw_data) < 1000:
-            print(f"\n[SERVER] Eroare: Am primit doar {len(raw_data)} bytes.")
             return "Prea putin audio", 400
 
         print(f"\n[SERVER] Primit {len(raw_data)} bytes de sunet de la ESP32.")
         
-        # Transformăm în Base64 pentru Google
         audio_b64_in = base64.b64encode(raw_data).decode('utf-8')
 
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + API_KEY
+        # AICI AM REPARAT: Am schimbat în gemini-3.8-flash
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + API_KEY
+        
         payload = {
             "contents": [{
                 "parts": [
@@ -62,11 +61,9 @@ def audio():
         if not audio_out_b64:
             return "Google nu a trimis audio", 500
 
-        # Decodăm sunetul primit de la Google înapoi în bytes bruți
         audio_out_bytes = base64.b64decode(audio_out_b64)
         print(f"[SERVER] Succes! Trimitere {len(audio_out_bytes)} bytes de sunet inapoi la ESP32.")
         
-        # Trimitem sunetul brut direct către ESP32 (fără JSON)
         return Response(audio_out_bytes, mimetype='application/octet-stream')
 
     except Exception as e:
