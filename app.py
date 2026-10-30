@@ -22,6 +22,7 @@ def audio():
         audio_b64_in = base64.b64encode(raw_data).decode('utf-8')
 
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + API_KEY
+        
         payload = {
             "contents": [{
                 "parts": [
@@ -45,28 +46,27 @@ def audio():
 
                 if response.status_code == 503:
                     wait_time = 2 ** attempt
-                    print(f"[SERVER] Eroare 503. Reincerc in {wait_time} secunde...")
+                    print(f"[SERVER] Eroare 503. Reincerc in {wait_time}s...")
                     time.sleep(wait_time)
                     continue
                 elif response.status_code != 200:
                     print(f"[SERVER] Eroare HTTP {response.status_code}: {response.text}")
                     return f"Eroare Google: {response.status_code}", 500
 
-                break  # Dacă e 200 OK, ieșim din buclă
+                break
                 
             except requests.exceptions.RequestException as e:
                 print(f"[SERVER] Exceptie retea: {str(e)}")
                 if attempt == max_retries - 1:
                     return f"Eroare retea: {str(e)}", 500
                 time.sleep(2 ** attempt)
-        else:
+        
+        if response is None or response.status_code != 200:
             return "Serverul Google este supraaglomerat. Incearca din nou.", 503
-
-        if response is None:
-            return "Nu s-a primit raspuns de la Google", 500
 
         resp_json = response.json()
         audio_out_b64 = None
+        
         try:
             parts = resp_json["candidates"][0]["content"]["parts"]
             for part in parts:
@@ -74,16 +74,19 @@ def audio():
                     audio_out_b64 = part["inlineData"]["data"]
                     break
         except Exception as e:
-            print(f"[SERVER] Eroare parsare raspuns: {e}")
-            return "Eroare parsare raspuns Google", 500
+            print(f"[SERVER] Eroare parsare: {e}")
+            return "Eroare parsare", 500
 
         if not audio_out_b64:
-            return "Google nu a trimis audio", 500
+            return "Fara audio in raspuns", 500
 
         audio_out_bytes = base64.b64decode(audio_out_b64)
         print(f"[SERVER] Succes! Trimit {len(audio_out_bytes)} bytes inapoi.")
         return Response(audio_out_bytes, mimetype='application/octet-stream')
 
     except Exception as e:
-        print(f"[SERVER] Exceptie generala: {str(e)}")
+        print(f"[SERVER] Eroare fatala: {str(e)}")
         return str(e), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
