@@ -1,13 +1,14 @@
 import os
 import asyncio
 import base64
+import traceback
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from google import genai
 from google.genai import types
 
 app = FastAPI()
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
-client = genai.Client(api_key=API_KEY, http_options={'api_version': 'v1alpha'})
+client = genai.Client(api_key=API_KEY, http_options={'api_version': 'v1beta'})
 
 @app.get("/")
 def health_check():
@@ -19,7 +20,8 @@ async def websocket_endpoint(websocket: WebSocket):
     print("\n[SERVER] ESP32 s-a conectat la WebSocket!")
     
     try:
-        # Ne conectăm la Google Live API
+        print("[SERVER] Se încearcă conectarea la Google Live API...")
+        # Folosim modelul recomandat pentru Live API
         async with client.aio.live.connect(
             model="gemini-2.0-flash-exp", 
             config=types.LiveConnectConfig(
@@ -32,21 +34,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 system_instruction=types.Content(parts=[types.Part(text="Esti un asistent vocal. Raspunde scurt in romana.")])
             )
         ) as session:
-            print("[SERVER] Conectat la Google Live API!")
+            print("[SERVER] >>> CONECTAT CU SUCCES LA GOOGLE LIVE API! <<<")
             
             async def receive_from_esp32():
                 while True:
                     try:
                         data = await websocket.receive_bytes()
-                        # Trimitem audio-ul brut (PCM 16kHz) direct la Google
                         await session.send_realtime_input(
                             media=types.Blob(data=data, mime_type="audio/pcm;rate=16000")
                         )
                     except WebSocketDisconnect:
-                        print("[SERVER] ESP32 deconectat.")
+                        print("[SERVER] ESP32 s-a deconectat.")
                         break
                     except Exception as e:
-                        print(f"[SERVER] Eroare ESP32: {e}")
+                        print(f"[SERVER] Eroare trimitere ESP32: {e}")
                         break
 
             async def receive_from_google():
@@ -54,21 +55,23 @@ async def websocket_endpoint(websocket: WebSocket):
                     try:
                         async for response in session.receive():
                             if response.data:
-                                # Trimitem sunetul primit de la Google inapoi la ESP32
                                 await websocket.send_bytes(response.data)
                     except Exception as e:
-                        print(f"[SERVER] Eroare Google: {e}")
+                        print(f"[SERVER] Eroare primire Google: {e}")
                         break
 
-            # Rulam ambele bucle simultan
             task1 = asyncio.create_task(receive_from_esp32())
             task2 = asyncio.create_task(receive_from_google())
             await asyncio.gather(task1, task2)
 
     except Exception as e:
-        print(f"[SERVER] Eroare fatala: {e}")
+        print(f"[SERVER] EROARE FATALA LA CONECTAREA CU GOOGLE:")
+        traceback.print_exc() # Afiseaza eroarea exacta in log-urile Render
     finally:
-        await websocket.close()
+        try:
+            await websocket.close()
+        except:
+            pass
 
 if __name__ == "__main__":
     import uvicorn
