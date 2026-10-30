@@ -1,56 +1,75 @@
 import os
-import requests
+import asyncio
 import base64
-from flask import Flask, request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from google import genai
+from google.genai import types
 
-app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+app = FastAPI()
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
+client = genai.Client(api_key=API_KEY, http_options={'api_version': 'v1alpha'})
 
-@app.route('/')
+@app.get("/")
 def health_check():
-    return "Proxy is running!", 200
+    return "Live Proxy is running!"
 
-@app.route('/audio', methods=['POST'])
-def audio():
+@app.websocket("/audio_ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    print("\n[SERVER] ESP32 s-a conectat la WebSocket!")
+    
     try:
-        raw_data = request.get_data()
-        if len(raw_data) < 1000:
-            return "Prea putin audio", 400
+        # Ne conectăm la Google Live API
+        async with client.aio.live.connect(
+            model="gemini-2.0-flash-exp", 
+            config=types.LiveConnectConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Puck")
+                    )
+                ),
+                system_instruction=types.Content(parts=[types.Part(text="Esti un asistent vocal. Raspunde scurt in romana.")])
+            )
+        ) as session:
+            print("[SERVER] Conectat la Google Live API!")
+            
+            async def receive_from_esp32():
+                while True:
+                    try:
+                        data = await websocket.receive_bytes()
+                        # Trimitem audio-ul brut (PCM 16kHz) direct la Google
+                        await session.send_realtime_input(
+                            media=types.Blob(data=data, mime_type="audio/pcm;rate=16000")
+                        )
+                    except WebSocketDisconnect:
+                        print("[SERVER] ESP32 deconectat.")
+                        break
+                    except Exception as e:
+                        print(f"[SERVER] Eroare ESP32: {e}")
+                        break
 
-        print(f"\n[SERVER] Primit {len(raw_data)} bytes.")
-        audio_b64_in = base64.b64encode(raw_data).decode('utf-8')
+            async def receive_from_google():
+                while True:
+                    try:
+                        async for response in session.receive():
+                            if response.data:
+                                # Trimitem sunetul primit de la Google inapoi la ESP32
+                                await websocket.send_bytes(response.data)
+                    except Exception as e:
+                        print(f"[SERVER] Eroare Google: {e}")
+                        break
 
-        # Cerem doar transcrierea, fara generare audio (mult mai rapid)
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + API_KEY
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": "Transcrie exact ce se aude in acest audio. Returneaza doar textul, fara introduceri."},
-                    {"inlineData": {"mimeType": "audio/pcm;rate=16000", "data": audio_b64_in}}
-                ]
-            }]
-        }
-
-        print("[SERVER] Trimitere STT catre Google...")
-        response = requests.post(url, json=payload, timeout=25)
-        
-        if response.status_code != 200:
-            print(f"[SERVER] Eroare Google: {response.status_code}")
-            return f"Eroare Google: {response.status_code}", 200
-
-        resp_json = response.json()
-        parts = resp_json.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        
-        text_out = "Nu am inteles."
-        for part in parts:
-            if "text" in part:
-                text_out = part["text"]
-                break
-
-        print(f"[SERVER] Transcriere: {text_out}")
-        return text_out, 200
+            # Rulam ambele bucle simultan
+            task1 = asyncio.create_task(receive_from_esp32())
+            task2 = asyncio.create_task(receive_from_google())
+            await asyncio.gather(task1, task2)
 
     except Exception as e:
-        print(f"[SERVER] Exceptie: {e}")
-        return f"Exceptie: {str(e)}", 200
+        print(f"[SERVER] Eroare fatala: {e}")
+    finally:
+        await websocket.close()
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
