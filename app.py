@@ -1,78 +1,78 @@
 import os
-import asyncio
-import traceback
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from google import genai
-from google.genai import types
+import base64
+import json
+from fastapi import FastAPI, Request
+from google.cloud import speech, texttospeech
+from google.oauth2 import service_account
 
 app = FastAPI()
-API_KEY = os.environ.get("GEMINI_API_KEY", "")
-# Folosim v1beta, endpoint-ul standard pentru Live API
-client = genai.Client(api_key=API_KEY, http_options={'api_version': 'v1beta'})
+
+# Preluăm credențialele din variabila de mediu (JSON-ul de la Google Cloud)
+creds_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+if not creds_json:
+    raise ValueError("Lipseste GOOGLE_APPLICATION_CREDENTIALS_JSON")
+
+creds_dict = json.loads(creds_json)
+credentials = service_account.Credentials.from_service_account_info(creds_dict)
+
+# Inițializăm clienții STT și TTS
+stt_client = speech.SpeechClient(credentials=credentials)
+tts_client = texttospeech.TextToSpeechClient(credentials=credentials)
 
 @app.get("/")
 def health_check():
-    return "Live Proxy is running!"
+    return "Hybrid Voice Proxy is running!"
 
-@app.websocket("/audio_ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    print("\n[SERVER] ESP32 s-a conectat la WebSocket!")
-    
+@app.post("/voice")
+async def voice_endpoint(request: Request):
     try:
-        print("[SERVER] Se încearcă conectarea la Google Live API...")
-        # MODELUL CORECT PENTRU VOCE LIVE
-        async with client.aio.live.connect(
-            model="models/gemini-live-2.5-flash-native-audio", 
-            config=types.LiveConnectConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Puck")
-                    )
-                ),
-                system_instruction=types.Content(parts=[types.Part(text="Esti un asistent vocal. Raspunde scurt in romana.")])
-            )
-        ) as session:
-            print("[SERVER] >>> CONECTAT CU SUCCES LA GOOGLE LIVE API! <<<")
-            
-            async def receive_from_esp32():
-                while True:
-                    try:
-                        data = await websocket.receive_bytes()
-                        await session.send_realtime_input(
-                            media=types.Blob(data=data, mime_type="audio/pcm;rate=16000")
-                        )
-                    except WebSocketDisconnect:
-                        print("[SERVER] ESP32 s-a deconectat.")
-                        break
-                    except Exception as e:
-                        print(f"[SERVER] Eroare trimitere ESP32: {e}")
-                        break
+        # 1. Primim audio-ul brut de la ESP32 (PCM 16kHz)
+        audio_bytes = await request.body()
+        if len(audio_bytes) < 1000:
+            return "Prea putin audio", 400
 
-            async def receive_from_google():
-                while True:
-                    try:
-                        async for response in session.receive():
-                            if response.data:
-                                await websocket.send_bytes(response.data)
-                    except Exception as e:
-                        print(f"[SERVER] Eroare primire Google: {e}")
-                        break
+        print(f"[SERVER] Primit {len(audio_bytes)} bytes de la ESP32.")
 
-            task1 = asyncio.create_task(receive_from_esp32())
-            task2 = asyncio.create_task(receive_from_google())
-            await asyncio.gather(task1, task2)
+        # 2. Trimitem la STT pentru transcriere
+        audio = speech.RecognitionAudio(content=audio_bytes)
+        config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=16000,
+            language_code="ro-RO",
+        )
+
+        print("[SERVER] Se trimite la Google STT...")
+        stt_response = stt_client.recognize(config=config, audio=audio)
+        
+        if not stt_response.results:
+            print("[SERVER] Nu s-a inteles nimic.")
+            return "Nu am inteles.", 200
+
+        text_input = stt_response.results[0].alternatives[0].transcript
+        print(f"[SERVER] Transcriere: {text_input}")
+
+        # 3. Trimitem textul la TTS pentru a genera vocea
+        synthesis_input = texttospeech.SynthesisInput(text=text_input)
+        
+        voice = texttospeech.VoiceSelectionParams(
+            language_code="ro-RO",
+            ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL
+        )
+        
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.LINEAR16,
+            sample_rate_hertz=24000
+        )
+
+        print("[SERVER] Se trimite la Google TTS...")
+        tts_response = tts_client.synthesize_speech(
+            input=synthesis_input, voice=voice, audio_config=audio_config
+        )
+
+        # 4. Returnăm audio-ul generat către ESP32
+        print(f"[SERVER] Succes! Trimit {len(tts_response.audio_content)} bytes inapoi.")
+        return tts_response.audio_content
 
     except Exception as e:
-        print(f"[SERVER] EROARE FATALA LA CONECTAREA CU GOOGLE:")
-        traceback.print_exc()
-        try:
-            await websocket.send_text(f"EROARE GOOGLE: {str(e)}")
-        except:
-            pass
-    finally:
-        try:
-            await websocket.close()
-        except:
-            pass
+        print(f"[SERVER] Eroare: {e}")
+        return f"Eroare server: {str(e)}", 500
