@@ -1,5 +1,4 @@
 fastapi
 uvicorn
-websockets
-google-genai
-python-multipart
+google-cloud-speech
+google-cloud-texttospeech
