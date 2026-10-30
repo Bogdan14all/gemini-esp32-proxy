@@ -1,77 +1,90 @@
 import os
 import base64
 import json
-from fastapi import FastAPI, Request
-from google.cloud import speech, texttospeech
-from google.oauth2 import service_account
+import requests
+from fastapi import FastAPI, Request, Response
 
 app = FastAPI()
-
-# Preluăm credențialele din variabila de mediu (JSON-ul de la Google Cloud)
-creds_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-if not creds_json:
-    raise ValueError("Lipseste GOOGLE_APPLICATION_CREDENTIALS_JSON")
-
-creds_dict = json.loads(creds_json)
-credentials = service_account.Credentials.from_service_account_info(creds_dict)
-
-# Inițializăm clienții STT și TTS
-stt_client = speech.SpeechClient(credentials=credentials)
-tts_client = texttospeech.TextToSpeechClient(credentials=credentials)
+API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 @app.get("/")
 def health_check():
-    return "Hybrid Voice Proxy is running!"
+    return "Gemini TTS Proxy is running!"
 
 @app.post("/voice")
 async def voice_endpoint(request: Request):
     try:
-        # 1. Primim audio-ul brut de la ESP32 (PCM 16kHz)
+        # 1. Primim audio-ul brut de la ESP32
         audio_bytes = await request.body()
         if len(audio_bytes) < 1000:
             return "Prea putin audio", 400
 
         print(f"[SERVER] Primit {len(audio_bytes)} bytes de la ESP32.")
 
-        # 2. Trimitem la STT pentru transcriere
-        audio = speech.RecognitionAudio(content=audio_bytes)
-        config = speech.RecognitionConfig(
-            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=16000,
-            language_code="ro-RO",
-        )
+        # 2. Trimitem la Gemini pentru transcriere (Speech-to-Text)
+        stt_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + API_KEY
+        stt_payload = {
+            "contents": [{
+                "parts": [
+                    {"text": "Transcrie exact ce se aude in acest audio. Returneaza doar textul, fara introduceri."},
+                    {"inlineData": {"mimeType": "audio/pcm;rate=16000", "data": base64.b64encode(audio_bytes).decode('utf-8')}}
+                ]
+            }]
+        }
 
-        print("[SERVER] Se trimite la Google STT...")
-        stt_response = stt_client.recognize(config=config, audio=audio)
+        print("[SERVER] Se trimite la Gemini STT...")
+        stt_response = requests.post(stt_url, json=stt_payload, timeout=30)
         
-        if not stt_response.results:
-            print("[SERVER] Nu s-a inteles nimic.")
-            return "Nu am inteles.", 200
+        if stt_response.status_code != 200:
+            print(f"[SERVER] Eroare STT: {stt_response.status_code}")
+            return f"Eroare STT: {stt_response.status_code}", 500
 
-        text_input = stt_response.results[0].alternatives[0].transcript
+        stt_json = stt_response.json()
+        parts = stt_json.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        text_input = "Nu am inteles."
+        for part in parts:
+            if "text" in part:
+                text_input = part["text"]
+                break
+
         print(f"[SERVER] Transcriere: {text_input}")
 
-        # 3. Trimitem textul la TTS pentru a genera vocea
-        synthesis_input = texttospeech.SynthesisInput(text=text_input)
-        
-        voice = texttospeech.VoiceSelectionParams(
-            language_code="ro-RO",
-            ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL
-        )
-        
-        audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.LINEAR16,
-            sample_rate_hertz=24000
-        )
+        # 3. Trimitem textul la Gemini TTS pentru a genera vocea
+        tts_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent?key=" + API_KEY
+        tts_payload = {
+            "contents": [{
+                "parts": [{"text": f"Spune urmatorul text pe un ton natural: {text_input}"}]
+            }],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {
+                    "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}
+                }
+            }
+        }
 
-        print("[SERVER] Se trimite la Google TTS...")
-        tts_response = tts_client.synthesize_speech(
-            input=synthesis_input, voice=voice, audio_config=audio_config
-        )
+        print("[SERVER] Se trimite la Gemini TTS...")
+        tts_response = requests.post(tts_url, json=tts_payload, timeout=30)
+
+        if tts_response.status_code != 200:
+            print(f"[SERVER] Eroare TTS: {tts_response.status_code}")
+            return f"Eroare TTS: {tts_response.status_code}", 500
+
+        tts_json = tts_response.json()
+        audio_out_b64 = None
+        parts = tts_json.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        for part in parts:
+            if "inlineData" in part:
+                audio_out_b64 = part["inlineData"]["data"]
+                break
+
+        if not audio_out_b64:
+            return "Gemini TTS nu a trimis audio", 500
 
         # 4. Returnăm audio-ul generat către ESP32
-        print(f"[SERVER] Succes! Trimit {len(tts_response.audio_content)} bytes inapoi.")
-        return tts_response.audio_content
+        audio_out_bytes = base64.b64decode(audio_out_b64)
+        print(f"[SERVER] Succes! Trimit {len(audio_out_bytes)} bytes inapoi.")
+        return Response(audio_out_bytes, mimetype='application/octet-stream')
 
     except Exception as e:
         print(f"[SERVER] Eroare: {e}")
