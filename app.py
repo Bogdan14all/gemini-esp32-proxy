@@ -1,42 +1,30 @@
 import os
 import requests
 import base64
-from flask import Flask, request, jsonify
+from flask import Flask, request, Response
 
 app = Flask(__name__)
-
 API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 @app.route('/')
 def health_check():
     return "Proxy is running!", 200
 
-# Ruta pentru TEXT (o pastram pentru test)
-@app.route('/chat', methods=['POST'])
-def chat():
-    data = request.json
-    prompt = data.get('text', 'Salut!')
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + API_KEY
-    try:
-        response = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=20)
-        resp_json = response.json()
-        text = resp_json["candidates"][0]["content"]["parts"][0]["text"]
-        return jsonify({"status": "ok", "text": text})
-    except Exception as e:
-        return jsonify({"status": "error", "text": str(e)}), 200
-
-# Ruta pentru AUDIO (Noua functionalitate)
 @app.route('/audio', methods=['POST'])
 def audio():
     try:
-        data = request.json
-        audio_b64_in = data.get('audio')
-        if not audio_b64_in:
-            return jsonify({"status": "error", "text": "Nu am primit audio."}), 200
+        # Preluăm datele audio brute (Raw Bytes) de la ESP32
+        raw_data = request.get_data()
+        
+        if len(raw_data) < 1000:
+            print(f"\n[SERVER] Eroare: Am primit doar {len(raw_data)} bytes.")
+            return "Prea putin audio", 400
 
-        print(f"\n[SERVER] Audio primit de la ESP32 (Base64 len: {len(audio_b64_in)})")
+        print(f"\n[SERVER] Primit {len(raw_data)} bytes de sunet de la ESP32.")
+        
+        # Transformăm în Base64 pentru Google
+        audio_b64_in = base64.b64encode(raw_data).decode('utf-8')
 
-        # Construim cererea pentru Gemini (Audio Input -> Audio Output)
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + API_KEY
         payload = {
             "contents": [{
@@ -47,18 +35,19 @@ def audio():
             }],
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
-                "speechConfig": {
-                    "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}
-                }
+                "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}}
             }
         }
 
         print("[SERVER] Trimitere catre Google...")
         response = requests.post(url, json=payload, timeout=60)
         
+        if response.status_code != 200:
+            print(f"[SERVER] Eroare Google: {response.text}")
+            return f"Eroare Google: {response.text}", 500
+
         resp_json = response.json()
         
-        # Extragem sunetul din răspunsul Google
         audio_out_b64 = None
         try:
             parts = resp_json["candidates"][0]["content"]["parts"]
@@ -67,16 +56,19 @@ def audio():
                     audio_out_b64 = part["inlineData"]["data"]
                     break
         except Exception as e:
-            print(f"[SERVER] Eroare parsare raspuns: {e}")
-            print(resp_json)
-            return jsonify({"status": "error", "text": "Google nu a trimis audio."}), 200
+            print(f"[SERVER] Eroare parsare: {e}")
+            return "Eroare parsare Google", 500
 
-        if audio_out_b64:
-            print(f"[SERVER] Succes! Trimitere audio inapoi la ESP32 (len: {len(audio_out_b64)})")
-            return jsonify({"status": "ok", "audio": audio_out_b64})
-        else:
-            return jsonify({"status": "error", "text": "Fara audio in raspuns."}), 200
+        if not audio_out_b64:
+            return "Google nu a trimis audio", 500
+
+        # Decodăm sunetul primit de la Google înapoi în bytes bruți
+        audio_out_bytes = base64.b64decode(audio_out_b64)
+        print(f"[SERVER] Succes! Trimitere {len(audio_out_bytes)} bytes de sunet inapoi la ESP32.")
+        
+        # Trimitem sunetul brut direct către ESP32 (fără JSON)
+        return Response(audio_out_bytes, mimetype='application/octet-stream')
 
     except Exception as e:
         print(f"[SERVER] Exceptie: {str(e)}")
-        return jsonify({"status": "error", "text": str(e)}), 200
+        return str(e), 500
