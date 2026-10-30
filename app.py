@@ -18,15 +18,16 @@ def audio():
         if len(raw_data) < 1000:
             return "Prea putin audio", 400
 
-        print(f"\n[SERVER] Primit {len(raw_data)} bytes.")
+        print(f"\n[SERVER] Primit {len(raw_data)} bytes de la ESP32.")
         audio_b64_in = base64.b64encode(raw_data).decode('utf-8')
 
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + API_KEY
+        # Lista de modele de rezervă (Fallback)
+        models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
         
         payload = {
             "contents": [{
                 "parts": [
-                    {"text": "Asculta acest audio si raspunde scurt in romana."},
+                    {"text": "Asculta acest audio si raspunde scurt si natural in romana."},
                     {"inlineData": {"mimeType": "audio/pcm;rate=16000", "data": audio_b64_in}}
                 ]
             }],
@@ -36,57 +37,62 @@ def audio():
             }
         }
 
-        max_retries = 3
-        response = None
-        
-        for attempt in range(max_retries):
-            try:
-                print(f"[SERVER] Incercarea {attempt + 1}/{max_retries}...")
-                response = requests.post(url, json=payload, timeout=60)
+        final_audio_out = None
+        error_message = ""
 
-                if response.status_code == 503:
-                    wait_time = 2 ** attempt
-                    print(f"[SERVER] Eroare 503. Reincerc in {wait_time}s...")
-                    time.sleep(wait_time)
-                    continue
-                elif response.status_code != 200:
-                    print(f"[SERVER] Eroare HTTP {response.status_code}: {response.text}")
-                    return f"Eroare Google: {response.status_code}", 500
+        for model in models_to_try:
+            print(f"[SERVER] Incercare model: {model}")
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key=" + API_KEY
+            
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response = requests.post(url, json=payload, timeout=60)
 
-                break
-                
-            except requests.exceptions.RequestException as e:
-                print(f"[SERVER] Exceptie retea: {str(e)}")
-                if attempt == max_retries - 1:
-                    return f"Eroare retea: {str(e)}", 500
-                time.sleep(2 ** attempt)
-        
-        if response is None or response.status_code != 200:
-            return "Serverul Google este supraaglomerat. Incearca din nou.", 503
+                    if response.status_code == 503:
+                        wait_time = 2 ** attempt
+                        print(f"[SERVER] {model} ocupat (503). Reincerc in {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue # Reincearca acelasi model
+                    
+                    elif response.status_code == 404:
+                        print(f"[SERVER] {model} nu exista (404). Trec la urmatorul model...")
+                        break # Iese din bucla de retry si trece la urmatorul model din lista
+                    
+                    elif response.status_code != 200:
+                        print(f"[SERVER] Eroare HTTP {response.status_code} la {model}.")
+                        error_message = f"Eroare {response.status_code}"
+                        break # Iese si trece la urmatorul model
 
-        resp_json = response.json()
-        audio_out_b64 = None
-        
-        try:
-            parts = resp_json["candidates"][0]["content"]["parts"]
-            for part in parts:
-                if "inlineData" in part:
-                    audio_out_b64 = part["inlineData"]["data"]
-                    break
-        except Exception as e:
-            print(f"[SERVER] Eroare parsare: {e}")
-            return "Eroare parsare", 500
+                    # Daca e 200 OK, procesam
+                    resp_json = response.json()
+                    parts = resp_json["candidates"][0]["content"]["parts"]
+                    for part in parts:
+                        if "inlineData" in part:
+                            final_audio_out = part["inlineData"]["data"]
+                            break
+                    
+                    if final_audio_out:
+                        print(f"[SERVER] Succes cu modelul {model}!")
+                        break # Iese din bucla de retry
+                        
+                except Exception as e:
+                    print(f"[SERVER] Eroare retea la {model}: {str(e)}")
+                    error_message = str(e)
+                    time.sleep(2)
 
-        if not audio_out_b64:
-            return "Fara audio in raspuns", 500
+            if final_audio_out:
+                break # Daca am gasit audio, oprim căutarea
 
-        audio_out_bytes = base64.b64decode(audio_out_b64)
-        print(f"[SERVER] Succes! Trimit {len(audio_out_bytes)} bytes inapoi.")
+        if not final_audio_out:
+            print(f"[SERVER] Toate modelele au esuat. Ultima eroare: {error_message}")
+            return f"Toate modelele au esuat. {error_message}", 500
+
+        # Trimitem inapoi audio-ul brut
+        audio_out_bytes = base64.b64decode(final_audio_out)
+        print(f"[SERVER] Trimit {len(audio_out_bytes)} bytes inapoi la ESP32.")
         return Response(audio_out_bytes, mimetype='application/octet-stream')
 
     except Exception as e:
         print(f"[SERVER] Eroare fatala: {str(e)}")
         return str(e), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
